@@ -9,10 +9,12 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
 import org.springframework.validation.method.ParameterValidationResult;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import tools.jackson.core.JacksonException;
 
@@ -49,6 +51,16 @@ public class GlobalExceptionHandler {
 			detail = firstLine(ex.getMostSpecificCause().getMessage());
 		}
 		return new ErrorResponse(400, "Malformed request body", List.of(detail));
+	}
+
+	// Bad query parameter: missing, wrong type (e.g. from=yesterday), or our own checks
+	@ExceptionHandler({
+			MissingServletRequestParameterException.class,
+			MethodArgumentTypeMismatchException.class,
+			BadRequestException.class })
+	@ResponseStatus(HttpStatus.BAD_REQUEST)
+	public ErrorResponse handleBadParameter(Exception ex) {
+		return new ErrorResponse(400, "Bad request", List.of(firstLine(ex.getMessage())));
 	}
 
 	// Builds "[0].rule.severity" from Jackson's path to the bad value
