@@ -1,11 +1,14 @@
 package com.chen.miniwsa.event;
 
+import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import com.chen.miniwsa.enrichment.AttackTypeClassifier;
+import com.chen.miniwsa.enrichment.ThreatScoreCalculator;
 
 import lombok.RequiredArgsConstructor;
 
@@ -13,19 +16,37 @@ import lombok.RequiredArgsConstructor;
 @RequiredArgsConstructor
 public class IngestService {
 
+	private static final Duration REPEAT_OFFENDER_WINDOW = Duration.ofMinutes(10);
+
 	private final SecurityEventRepository repository;
 
 	@Transactional
 	public int ingest(List<EventRequest> requests) {
 		Instant receivedAt = Instant.now();
 
-		List<SecurityEvent> events = new ArrayList<>();
+		// Saved one by one, so later events in the same batch count earlier ones as recent
 		for (EventRequest request : requests) {
-			events.add(toEntity(request, receivedAt));
+			SecurityEvent event = toEntity(request, receivedAt);
+			enrich(event);
+			repository.save(event);
 		}
 
-		repository.saveAll(events);
-		return events.size();
+		return requests.size();
+	}
+
+	private void enrich(SecurityEvent event) {
+		event.setAttackType(AttackTypeClassifier.classify(event.getRuleCategory()));
+
+		long recentEventsFromSameIp = repository.countByClientIpAndEventTimeBetween(
+				event.getClientIp(),
+				event.getEventTime().minus(REPEAT_OFFENDER_WINDOW),
+				event.getEventTime());
+
+		event.setThreatScore(ThreatScoreCalculator.calculate(
+				event.getRuleSeverity(),
+				event.getAction(),
+				event.getPath(),
+				recentEventsFromSameIp));
 	}
 
 	private SecurityEvent toEntity(EventRequest request, Instant receivedAt) {

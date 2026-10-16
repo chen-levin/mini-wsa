@@ -6,12 +6,17 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -76,6 +81,19 @@ class EventIngestIntegrationTest {
 	}
 
 	@Test
+	void eventIsEnriched() throws Exception {
+		mockMvc.perform(post("/v1/events/ingest")
+				.contentType(MediaType.APPLICATION_JSON)
+				.content(VALID_EVENT))
+				.andExpect(status().isCreated());
+
+		SecurityEvent saved = repository.findAll().get(0);
+		assertThat(saved.getAttackType()).isEqualTo("SQL/Command Injection");
+		// CRITICAL 40 + DENY 20 + /login 15
+		assertThat(saved.getThreatScore()).isEqualTo(75);
+	}
+
+	@Test
 	void arrayOfEventsIsStored() throws Exception {
 		mockMvc.perform(post("/v1/events/ingest")
 				.contentType(MediaType.APPLICATION_JSON)
@@ -84,6 +102,49 @@ class EventIngestIntegrationTest {
 				.andExpect(jsonPath("$.ingested").value(2));
 
 		assertThat(repository.count()).isEqualTo(2);
+	}
+
+	@Test
+	void repeatOffenderBonusAppliesFromSeventhEventInBatch() throws Exception {
+		String sevenEvents = "[" + String.join(",", Collections.nCopies(7, VALID_EVENT)) + "]";
+
+		mockMvc.perform(post("/v1/events/ingest")
+				.contentType(MediaType.APPLICATION_JSON)
+				.content(sevenEvents))
+				.andExpect(status().isCreated());
+
+		List<SecurityEvent> saved = repository.findAll(Sort.by("id"));
+		// Events 1-6 see at most 5 earlier events from this IP: no bonus
+		assertThat(saved.get(5).getThreatScore()).isEqualTo(75);
+		// Event 7 sees 6 earlier events: +15
+		assertThat(saved.get(6).getThreatScore()).isEqualTo(90);
+	}
+
+	@Test
+	void repeatOffenderCountIsPerIp() throws Exception {
+		String eventFromA = VALID_EVENT;
+		String eventFromB = VALID_EVENT.replace("203.0.113.42", "198.51.100.7");
+
+		// A, B, A, B, ... six of each, then one more from A
+		List<String> batch = new ArrayList<>();
+		for (int i = 0; i < 6; i++) {
+			batch.add(eventFromA);
+			batch.add(eventFromB);
+		}
+		batch.add(eventFromA);
+
+		mockMvc.perform(post("/v1/events/ingest")
+				.contentType(MediaType.APPLICATION_JSON)
+				.content("[" + String.join(",", batch) + "]"))
+				.andExpect(status().isCreated());
+
+		List<SecurityEvent> saved = repository.findAll(Sort.by("id"));
+		// B's sixth event sees 11 earlier events in total, but only 5 from B: no bonus
+		assertThat(saved.get(11).getClientIp()).isEqualTo("198.51.100.7");
+		assertThat(saved.get(11).getThreatScore()).isEqualTo(75);
+		// A's seventh event sees 6 earlier events from A: +15
+		assertThat(saved.get(12).getClientIp()).isEqualTo("203.0.113.42");
+		assertThat(saved.get(12).getThreatScore()).isEqualTo(90);
 	}
 
 	@Test

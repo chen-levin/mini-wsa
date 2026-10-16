@@ -51,4 +51,7 @@ public class SecurityEvent {
 	private String geoCity;
 	private Long requestSize;
 	private Long responseSize;
+
+	private String attackType;
+	private Integer threatScore;
 }
