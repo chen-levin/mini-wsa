@@ -7,14 +7,13 @@ import java.util.List;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import lombok.RequiredArgsConstructor;
+
 @Service
+@RequiredArgsConstructor
 public class IngestService {
 
 	private final SecurityEventRepository repository;
-
-	public IngestService(SecurityEventRepository repository) {
-		this.repository = repository;
-	}
 
 	@Transactional
 	public int ingest(List<EventRequest> requests) {

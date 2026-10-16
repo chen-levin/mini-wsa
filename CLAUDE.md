@@ -5,7 +5,8 @@ A small security analytics pipeline: ingest security events (DLRs), enrich them
 
 ## Working rules
 - The author must explain and live-modify every line in the interview.
-  **Keep code simple, explicit, and boring.** No clever abstractions, no extra libraries.
+  **Keep code simple, explicit, and boring.** No clever abstractions, no extra libraries
+  (exception: Lombok, for `@Getter`/`@Setter` on entities and `@RequiredArgsConstructor`).
 - Work one small part at a time. After each part: explain what/why in plain terms,
   propose a commit message, then STOP. The author reviews and commits themselves.
 - Never commit the assignment PDF.
