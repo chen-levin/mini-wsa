@@ -11,3 +11,6 @@ spring:
     open-in-view: false
   flyway:
     enabled: true
+  jackson:
+    deserialization:
+      accept-single-value-as-array: true
