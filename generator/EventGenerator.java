@@ -1,4 +1,8 @@
 import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -17,13 +21,18 @@ import java.util.Random;
  *  - attack waves: one IP hitting one path many times within a few minutes
  *
  * Run (no build needed, Java 21):
- *   java generator/EventGenerator.java [count] [outputFile]
+ *   java generator/EventGenerator.java [count] [outputFile]        write to a file
+ *   java generator/EventGenerator.java [count] --send [baseUrl]    post to the ingest API
+ *
  *   java generator/EventGenerator.java 10000 events.json
+ *   java generator/EventGenerator.java 10000 --send
  */
 public class EventGenerator {
 
 	private static final int DEFAULT_COUNT = 10_000;
 	private static final String DEFAULT_OUTPUT = "events.json";
+	private static final String DEFAULT_BASE_URL = "http://localhost:8080";
+	private static final int BATCH_SIZE = 500;
 
 	// How the events are spread in time: over the last 6 hours, ending now
 	private static final Duration TIME_SPAN = Duration.ofHours(6);
@@ -72,18 +81,46 @@ public class EventGenerator {
 	private final Instant start = end.minus(TIME_SPAN);
 	private int nextEventNumber = 1;
 
-	public static void main(String[] args) throws IOException {
+	public static void main(String[] args) throws IOException, InterruptedException {
 		int count = args.length > 0 ? Integer.parseInt(args[0]) : DEFAULT_COUNT;
-		Path output = Path.of(args.length > 1 ? args[1] : DEFAULT_OUTPUT);
 
 		EventGenerator generator = new EventGenerator();
 		List<Event> events = generator.generate(count);
 
-		Files.writeString(output, toJsonArray(events));
-
 		long waveEvents = events.stream().filter(Event::inWave).count();
-		System.out.printf("Generated %d events (%d background, %d in attack waves) -> %s%n",
-				events.size(), events.size() - waveEvents, waveEvents, output);
+		System.out.printf("Generated %d events (%d background, %d in attack waves)%n",
+				events.size(), events.size() - waveEvents, waveEvents);
+
+		if (args.length > 1 && args[1].equals("--send")) {
+			String baseUrl = args.length > 2 ? args[2] : DEFAULT_BASE_URL;
+			send(events, baseUrl);
+		} else {
+			Path output = Path.of(args.length > 1 ? args[1] : DEFAULT_OUTPUT);
+			Files.writeString(output, toJsonArray(events));
+			System.out.println("Written to " + output);
+		}
+	}
+
+	// Posts the events to the ingest API in batches, oldest first
+	private static void send(List<Event> events, String baseUrl) throws IOException, InterruptedException {
+		HttpClient client = HttpClient.newHttpClient();
+		URI ingestUri = URI.create(baseUrl + "/v1/events/ingest");
+
+		for (int from = 0; from < events.size(); from += BATCH_SIZE) {
+			int to = Math.min(from + BATCH_SIZE, events.size());
+			HttpRequest request = HttpRequest.newBuilder(ingestUri)
+					.header("Content-Type", "application/json")
+					.POST(HttpRequest.BodyPublishers.ofString(toJsonArray(events.subList(from, to))))
+					.build();
+
+			HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+			if (response.statusCode() != 201) {
+				System.out.println("Failed with HTTP " + response.statusCode() + ": " + response.body());
+				System.exit(1);
+			}
+			System.out.printf("Sent %d/%d%n", to, events.size());
+		}
+		System.out.println("Done: all events ingested at " + ingestUri);
 	}
 
 	List<Event> generate(int count) {
