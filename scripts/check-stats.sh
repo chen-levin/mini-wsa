@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Manual checks for GET /v1/stats/summary against a running app with generated data.
+# Checks GET /v1/stats/summary against a running app with generated data.
+# Every line prints: PASS/FAIL, what is checked, the expected value and the actual value.
 #
 # Usage:
 #   ./scripts/check-stats.sh                      # app on http://localhost:8080
@@ -9,89 +10,82 @@
 
 BASE_URL="${BASE_URL:-http://localhost:8080}"
 STATS="$BASE_URL/v1/stats/summary"
+PASSED=0
+FAILED=0
 
 # ISO-8601 UTC time, shifted by N hours from now (works on macOS and Linux)
 hours_from_now() {
   date -u -v"${1}H" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "${1} hours" +%Y-%m-%dT%H:%M:%SZ
 }
 
-# Reads one field from the JSON on stdin, e.g. json_field totalEvents
-json_field() {
-  python3 -c "import sys,json; print(json.load(sys.stdin)['$1'])"
+# check "what is checked" expected actual
+check() {
+  if [ "$2" = "$3" ]; then
+    echo "PASS  $1 | expected: $2 | actual: $3"
+    PASSED=$((PASSED + 1))
+  else
+    echo "FAIL  $1 | expected: $2 | actual: $3"
+    FAILED=$((FAILED + 1))
+  fi
+}
+
+# Runs a Python expression on the JSON from stdin; the JSON is available as d
+py() {
+  python3 -c "import sys, json; d = json.load(sys.stdin); print($1)"
 }
 
 # The generator creates events over the last 6 hours, so this window covers all of them
 FROM=$(hours_from_now -7)
 TO=$(hours_from_now +1)
+SUMMARY=$(curl -s "$STATS?from=$FROM&to=$TO")
+TOTAL=$(echo "$SUMMARY" | py 'd["totalEvents"]')
 
 echo "Stats checks against $STATS"
-echo "Window: $FROM -> $TO"
-
+echo "Window: $FROM -> $TO, total events: $TOTAL"
 echo
-echo "=== 1. Totals ==="
-TOTAL=$(curl -s "$STATS?from=$FROM&to=$TO" | json_field totalEvents)
-echo "All configs: $TOTAL"
+
+echo "--- Totals ---"
 SUM=0
 for CONFIG in 14227 14228 31001; do
-  COUNT=$(curl -s "$STATS?configId=$CONFIG&from=$FROM&to=$TO" | json_field totalEvents)
-  echo "Config $CONFIG: $COUNT"
+  COUNT=$(curl -s "$STATS?configId=$CONFIG&from=$FROM&to=$TO" | py 'd["totalEvents"]')
   SUM=$((SUM + COUNT))
 done
-echo "Sum of configs: $SUM (should equal $TOTAL)"
+check "The 3 configs add up to the total" "$TOTAL" "$SUM"
+check "configId is null when not given" "None" "$(echo "$SUMMARY" | py 'd["configId"]')"
 
 echo
-echo "=== 2. byAction adds up to totalEvents ==="
-curl -s "$STATS?from=$FROM&to=$TO" | python3 -c '
-import sys, json
-d = json.load(sys.stdin)
-print(d["byAction"], "sum =", sum(d["byAction"].values()), "total =", d["totalEvents"])'
+echo "--- byCategory and byAction ---"
+check "byCategory has all 7 categories" "7" "$(echo "$SUMMARY" | py 'len(d["byCategory"])')"
+check "byCategory counts add up to the total" "$TOTAL" "$(echo "$SUMMARY" | py 'sum(c["count"] for c in d["byCategory"].values())')"
+check "byAction has all 3 actions" "3" "$(echo "$SUMMARY" | py 'len(d["byAction"])')"
+check "byAction counts add up to the total" "$TOTAL" "$(echo "$SUMMARY" | py 'sum(d["byAction"].values())')"
+check "Averages are between 0 and 100" "True" "$(echo "$SUMMARY" | py 'all(0 <= c["avgThreatScore"] <= 100 for c in d["byCategory"].values())')"
 
 echo
-echo "=== 3. byCategory (all 7 categories, zero-filled) ==="
-curl -s "$STATS?from=$FROM&to=$TO" | python3 -c '
-import sys, json
-for name, s in json.load(sys.stdin)["byCategory"].items():
-    print("%-20s count=%5d  avg=%s" % (name, s["count"], s["avgThreatScore"]))'
+echo "--- Top attackers and paths ---"
+check "topAttackers has 10 entries" "10" "$(echo "$SUMMARY" | py 'len(d["topAttackers"])')"
+check "topAttackers sorted by count, highest first" "True" "$(echo "$SUMMARY" | py 'all(a["count"] >= b["count"] for a, b in zip(d["topAttackers"], d["topAttackers"][1:]))')"
+check "Top attacker is a wave IP (198.51.100.x)" "True" "$(echo "$SUMMARY" | py 'd["topAttackers"][0]["clientIp"].startswith("198.51.100.")')"
+check "topTargetedPaths has 10 entries" "10" "$(echo "$SUMMARY" | py 'len(d["topTargetedPaths"])')"
+check "topTargetedPaths sorted by count, highest first" "True" "$(echo "$SUMMARY" | py 'all(a["count"] >= b["count"] for a, b in zip(d["topTargetedPaths"], d["topTargetedPaths"][1:]))')"
+check "Top path is a wave path" "True" "$(echo "$SUMMARY" | py 'd["topTargetedPaths"][0]["path"] in ("/login", "/api/v1/login", "/admin", "/search")')"
 
 echo
-echo "=== 4. Top attackers (expect mostly wave IPs 198.51.100.x) ==="
-curl -s "$STATS?from=$FROM&to=$TO" | python3 -c '
-import sys, json
-for a in json.load(sys.stdin)["topAttackers"]:
-    print("%-16s count=%4d  avg=%s" % (a["clientIp"], a["count"], a["avgThreatScore"]))'
+echo "--- Empty results ---"
+check "A window with no events returns 0" "0" "$(curl -s "$STATS?from=$(hours_from_now -48)&to=$(hours_from_now -24)" | py 'd["totalEvents"]')"
+check "An unknown config returns 0" "0" "$(curl -s "$STATS?configId=99999&from=$FROM&to=$TO" | py 'd["totalEvents"]')"
 
 echo
-echo "=== 5. Top targeted paths (expect wave paths on top) ==="
-curl -s "$STATS?from=$FROM&to=$TO" | python3 -c '
-import sys, json
-for p in json.load(sys.stdin)["topTargetedPaths"]:
-    print("%-16s count=%d" % (p["path"], p["count"]))'
-
-echo
-echo "=== 6. Events per hour ==="
-for H in 7 6 5 4 3 2 1; do
-  F=$(hours_from_now -$H)
-  T=$(hours_from_now -$((H - 1)))
-  COUNT=$(curl -s "$STATS?from=$F&to=$T" | json_field totalEvents)
-  echo "$F -> $T: $COUNT"
-done
-
-echo
-echo "=== 7. Empty results (expect 0, not an error) ==="
-echo -n "Yesterday: "
-curl -s "$STATS?from=$(hours_from_now -48)&to=$(hours_from_now -24)" | json_field totalEvents
-echo -n "Unknown config 99999: "
-curl -s "$STATS?configId=99999&from=$FROM&to=$TO" | json_field totalEvents
-
-echo
-echo "=== 8. Bad requests (expect HTTP 400) ==="
-check_400() {
-  CODE=$(curl -s -o /dev/null -w '%{http_code}' "$2")
-  echo "$1: HTTP $CODE"
+echo "--- Bad requests ---"
+status() {
+  curl -s -o /dev/null -w '%{http_code}' "$1"
 }
-check_400 "Missing from      " "$STATS?to=$TO"
-check_400 "Missing to        " "$STATS?from=$FROM"
-check_400 "from after to     " "$STATS?from=$TO&to=$FROM"
-check_400 "from equals to    " "$STATS?from=$FROM&to=$FROM"
-check_400 "Bad date format   " "$STATS?from=yesterday&to=$TO"
-check_400 "Non-numeric config" "$STATS?configId=abc&from=$FROM&to=$TO"
+check "Missing from returns 400" "400" "$(status "$STATS?to=$TO")"
+check "Missing to returns 400" "400" "$(status "$STATS?from=$FROM")"
+check "from after to returns 400" "400" "$(status "$STATS?from=$TO&to=$FROM")"
+check "from equal to to returns 400" "400" "$(status "$STATS?from=$FROM&to=$FROM")"
+check "Bad date format returns 400" "400" "$(status "$STATS?from=yesterday&to=$TO")"
+check "Non-numeric configId returns 400" "400" "$(status "$STATS?configId=abc&from=$FROM&to=$TO")"
+
+echo
+echo "Result: $PASSED passed, $FAILED failed"

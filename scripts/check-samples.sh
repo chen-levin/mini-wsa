@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Manual checks for GET /v1/events/samples against a running app with generated data.
+# Checks GET /v1/events/samples against a running app with generated data.
+# Every line prints: PASS/FAIL, what is checked, the expected value and the actual value.
 #
 # Usage:
 #   ./scripts/check-samples.sh                    # app on http://localhost:8080
@@ -10,98 +11,95 @@
 BASE_URL="${BASE_URL:-http://localhost:8080}"
 SAMPLES="$BASE_URL/v1/events/samples"
 STATS="$BASE_URL/v1/stats/summary"
+PASSED=0
+FAILED=0
 
 # ISO-8601 UTC time, shifted by N hours from now (works on macOS and Linux)
 hours_from_now() {
   date -u -v"${1}H" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "${1} hours" +%Y-%m-%dT%H:%M:%SZ
 }
 
-# Reads one field from the JSON on stdin, e.g. json_field total
-json_field() {
-  python3 -c "import sys,json; print(json.load(sys.stdin)['$1'])"
+# check "what is checked" expected actual
+check() {
+  if [ "$2" = "$3" ]; then
+    echo "PASS  $1 | expected: $2 | actual: $3"
+    PASSED=$((PASSED + 1))
+  else
+    echo "FAIL  $1 | expected: $2 | actual: $3"
+    FAILED=$((FAILED + 1))
+  fi
 }
+
+# Runs a Python expression on the JSON from stdin; the JSON is available as d
+py() {
+  python3 -c "import sys, json; d = json.load(sys.stdin); print($1)"
+}
+
+DEFAULT_PAGE=$(curl -s "$SAMPLES")
+TOTAL=$(echo "$DEFAULT_PAGE" | py 'd["total"]')
+PAGE_100=$(curl -s "$SAMPLES?limit=100")
 
 echo "Samples checks against $SAMPLES"
+echo "Total events: $TOTAL"
+echo
+
+echo "--- Defaults ---"
+check "Default limit is 20" "20" "$(echo "$DEFAULT_PAGE" | py 'd["limit"]')"
+check "Default offset is 0" "0" "$(echo "$DEFAULT_PAGE" | py 'd["offset"]')"
+check "Returns 20 events" "20" "$(echo "$DEFAULT_PAGE" | py 'len(d["events"])')"
 
 echo
-echo "=== 1. Defaults (expect limit 20, offset 0, 20 events) ==="
-curl -s "$SAMPLES" | python3 -c '
-import sys, json
-d = json.load(sys.stdin)
-print("total =", d["total"], " limit =", d["limit"], " offset =", d["offset"], " events returned =", len(d["events"]))'
+echo "--- Event shape ---"
+check "Every event has a nested rule with category" "True" "$(echo "$PAGE_100" | py 'all("category" in e["rule"] for e in d["events"])')"
+check "Every event has a nested geoLocation with country" "True" "$(echo "$PAGE_100" | py 'all("country" in e["geoLocation"] for e in d["events"])')"
+check "Every event has attackType and threatScore" "True" "$(echo "$PAGE_100" | py 'all(e["attackType"] and e["threatScore"] is not None for e in d["events"])')"
 
 echo
-echo "=== 2. One event in full (nested rule and geoLocation, plus enrichment) ==="
-curl -s "$SAMPLES?limit=1" | python3 -m json.tool
-
-echo
-echo "=== 3. Newest first (timestamps must go down) ==="
-curl -s "$SAMPLES?limit=100" | python3 -c '
-import sys, json
-times = [e["timestamp"] for e in json.load(sys.stdin)["events"]]
-print("first:", times[0], " last:", times[-1])
-print("sorted newest first:", all(times[i] >= times[i + 1] for i in range(len(times) - 1)))'
-
-echo
-echo "=== 4. Paging (page 1 and page 2 of size 5 must not overlap) ==="
+echo "--- Order and paging ---"
+check "Events sorted newest first" "True" "$(echo "$PAGE_100" | py 'all(a["timestamp"] >= b["timestamp"] for a, b in zip(d["events"], d["events"][1:]))')"
 PAGE1=$(curl -s "$SAMPLES?limit=5&offset=0")
 PAGE2=$(curl -s "$SAMPLES?limit=5&offset=5")
-echo "Page 1: $(echo "$PAGE1" | python3 -c 'import sys,json; print([e["eventId"] for e in json.load(sys.stdin)["events"]])')"
-echo "Page 2: $(echo "$PAGE2" | python3 -c 'import sys,json; print([e["eventId"] for e in json.load(sys.stdin)["events"]])')"
-python3 -c '
-import sys, json
-p1 = {e["eventId"] for e in json.loads(sys.argv[1])["events"]}
-p2 = {e["eventId"] for e in json.loads(sys.argv[2])["events"]}
-print("overlap:", p1 & p2 or "none")' "$PAGE1" "$PAGE2"
+IDS1=$(echo "$PAGE1" | py '",".join(e["eventId"] for e in d["events"])')
+IDS2=$(echo "$PAGE2" | py '",".join(e["eventId"] for e in d["events"])')
+check "Page 2 echoes offset 5" "5" "$(echo "$PAGE2" | py 'd["offset"]')"
+check "Page 1 and page 2 share no events" "True" "$(python3 -c "print(not set('$IDS1'.split(',')) & set('$IDS2'.split(',')))")"
+check "Page 1 + page 2 = the first 10 events" "$(echo "$PAGE_100" | py '",".join(e["eventId"] for e in d["events"][:10])')" "$IDS1,$IDS2"
+check "An offset past the end returns no events" "0" "$(curl -s "$SAMPLES?offset=$TOTAL" | py 'len(d["events"])')"
 
 echo
-echo "=== 5. Filters: totals per category add up to the overall total ==="
-TOTAL=$(curl -s "$SAMPLES?limit=1" | json_field total)
+echo "--- Filters ---"
 SUM=0
 for CATEGORY in INJECTION XSS PROTOCOL_VIOLATION DATA_LEAKAGE BOT DOS RATE_LIMIT; do
-  COUNT=$(curl -s "$SAMPLES?category=$CATEGORY&limit=1" | json_field total)
-  printf "%-20s %s\n" "$CATEGORY" "$COUNT"
+  COUNT=$(curl -s "$SAMPLES?category=$CATEGORY&limit=1" | py 'd["total"]')
   SUM=$((SUM + COUNT))
 done
-echo "Sum: $SUM (should equal $TOTAL)"
-
-echo
-echo "=== 6. Combined filters (every returned event must match) ==="
-curl -s "$SAMPLES?configId=14227&category=INJECTION&action=DENY&limit=100" | python3 -c '
-import sys, json
-d = json.load(sys.stdin)
-ok = all(e["configId"] == 14227 and e["rule"]["category"] == "INJECTION" and e["action"] == "DENY" for e in d["events"])
-print("configId=14227 + INJECTION + DENY: total =", d["total"], " returned =", len(d["events"]), " all match:", ok)'
-
-echo
-echo "=== 7. Samples and stats agree on the same window ==="
+check "The 7 category totals add up to the total" "$TOTAL" "$SUM"
+FILTERED=$(curl -s "$SAMPLES?configId=14227&category=INJECTION&action=DENY&limit=100")
+check "configId + category + action: every event matches" "True" "$(echo "$FILTERED" | py 'all(e["configId"] == 14227 and e["rule"]["category"] == "INJECTION" and e["action"] == "DENY" for e in d["events"])')"
 FROM=$(hours_from_now -3)
 TO=$(hours_from_now +1)
-SAMPLES_TOTAL=$(curl -s "$SAMPLES?from=$FROM&to=$TO&limit=1" | json_field total)
-STATS_TOTAL=$(curl -s "$STATS?from=$FROM&to=$TO" | json_field totalEvents)
-echo "$FROM -> $TO: samples total = $SAMPLES_TOTAL, stats total = $STATS_TOTAL"
+check "Samples total = stats total for the same window" \
+  "$(curl -s "$STATS?from=$FROM&to=$TO" | py 'd["totalEvents"]')" \
+  "$(curl -s "$SAMPLES?from=$FROM&to=$TO&limit=1" | py 'd["total"]')"
 
 echo
-echo "=== 8. Enrichment is consistent (attackType matches category, score 0-100) ==="
-curl -s "$SAMPLES?limit=100" | python3 -c '
-import sys, json
-expected = {"INJECTION": "SQL/Command Injection", "XSS": "Cross-Site Scripting",
-            "PROTOCOL_VIOLATION": "Protocol Anomaly", "DATA_LEAKAGE": "Data Exfiltration",
-            "BOT": "Bot Activity", "DOS": "Denial of Service", "RATE_LIMIT": "Rate Limiting"}
-events = json.load(sys.stdin)["events"]
-print("attackType matches category:", all(expected[e["rule"]["category"]] == e["attackType"] for e in events))
-print("threatScore within 0-100:", all(0 <= e["threatScore"] <= 100 for e in events))'
+echo "--- Enrichment ---"
+check "attackType matches the category" "True" "$(echo "$PAGE_100" | py 'all({"INJECTION": "SQL/Command Injection", "XSS": "Cross-Site Scripting", "PROTOCOL_VIOLATION": "Protocol Anomaly", "DATA_LEAKAGE": "Data Exfiltration", "BOT": "Bot Activity", "DOS": "Denial of Service", "RATE_LIMIT": "Rate Limiting"}[e["rule"]["category"]] == e["attackType"] for e in d["events"])')"
+check "threatScore is between 0 and 100" "True" "$(echo "$PAGE_100" | py 'all(0 <= e["threatScore"] <= 100 for e in d["events"])')"
+check "No event happens after it was received" "True" "$(echo "$PAGE_100" | py 'all(e["timestamp"] <= e["receivedAt"] for e in d["events"])')"
 
 echo
-echo "=== 9. Bad requests (expect HTTP 400) ==="
-check_400() {
-  CODE=$(curl -s -o /dev/null -w '%{http_code}' "$2")
-  echo "$1: HTTP $CODE"
+echo "--- Bad requests ---"
+status() {
+  curl -s -o /dev/null -w '%{http_code}' "$1"
 }
-check_400 "limit=0           " "$SAMPLES?limit=0"
-check_400 "limit=101         " "$SAMPLES?limit=101"
-check_400 "offset=-1         " "$SAMPLES?offset=-1"
-check_400 "Unknown category  " "$SAMPLES?category=SQLI"
-check_400 "Unknown action    " "$SAMPLES?action=BLOCK"
-check_400 "from after to     " "$SAMPLES?from=$TO&to=$FROM"
-check_400 "Bad date format   " "$SAMPLES?from=yesterday"
+check "limit=0 returns 400" "400" "$(status "$SAMPLES?limit=0")"
+check "limit=101 returns 400" "400" "$(status "$SAMPLES?limit=101")"
+check "offset=-1 returns 400" "400" "$(status "$SAMPLES?offset=-1")"
+check "Unknown category returns 400" "400" "$(status "$SAMPLES?category=SQLI")"
+check "Unknown action returns 400" "400" "$(status "$SAMPLES?action=BLOCK")"
+check "from after to returns 400" "400" "$(status "$SAMPLES?from=$TO&to=$FROM")"
+check "Bad date format returns 400" "400" "$(status "$SAMPLES?from=yesterday")"
+
+echo
+echo "Result: $PASSED passed, $FAILED failed"
