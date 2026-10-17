@@ -55,6 +55,11 @@ public class EventGenerator {
 			"/search", "/products", "/checkout", "/wp-admin", "/static/app.js" };
 	private static final String[] WAVE_PATHS = { "/login", "/api/v1/login", "/admin", "/search" };
 
+	// IP ranges reserved for documentation: waves use one, background traffic uses the other two.
+	// About 500 background IPs, so even the busiest one stays far below a single wave of 50.
+	private static final String WAVE_IP_PREFIX = "198.51.100.";
+	private static final String[] BACKGROUND_IP_PREFIXES = { "203.0.113.", "192.0.2." };
+
 	private static final String[] USER_AGENTS = {
 			"Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
 			"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)",
@@ -146,7 +151,7 @@ public class EventGenerator {
 
 	// One attacker: same IP, path, rule, location and site for all 50 events, 5 seconds apart
 	private List<Event> wave() {
-		String ip = "198.51.100." + randomBetween(1, 254);
+		String ip = WAVE_IP_PREFIX + randomBetween(1, 254);
 		String path = pick(WAVE_PATHS);
 		Rule rule = pick(WAVE_RULES);
 		GeoLocation location = pick(LOCATIONS);
@@ -163,9 +168,9 @@ public class EventGenerator {
 		return events;
 	}
 
-	// Random everything; a pool of 200 IPs, so some background IPs repeat naturally
+	// Random everything, from a pool of about 500 background IPs
 	private Event backgroundEvent() {
-		String ip = "203.0.113." + randomBetween(1, 200);
+		String ip = pick(BACKGROUND_IP_PREFIXES) + randomBetween(1, 254);
 		return event(randomTimeBetween(start, end), pick(SITES), ip, pick(PATHS), pick(RULES), pick(LOCATIONS));
 	}
 
