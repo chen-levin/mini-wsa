@@ -44,9 +44,11 @@ public class EventGenerator {
 	private static final int SECONDS_BETWEEN_WAVE_EVENTS = 5;
 	private static final Duration WAVE_DURATION = Duration.ofSeconds((long) WAVE_SIZE * SECONDS_BETWEEN_WAVE_EVENTS);
 
-	private static final long[] CONFIG_IDS = { 14227, 14228, 31001 };
-	private static final String[] POLICY_IDS = { "pol_web1", "pol_api1", "pol_shop1" };
-	private static final String[] HOSTNAMES = { "www.example.com", "api.example.com", "shop.example.com" };
+	// Three customer websites, each with its own config
+	private static final Site[] SITES = {
+			new Site(14227, "pol_web1", "www.example.com"),
+			new Site(14228, "pol_api1", "api.example.com"),
+			new Site(31001, "pol_shop1", "shop.example.com") };
 
 	private static final String[] PATHS = {
 			"/", "/login", "/admin", "/api/v1/login", "/api/v1/users", "/api/v1/orders",
@@ -148,7 +150,7 @@ public class EventGenerator {
 		String path = pick(WAVE_PATHS);
 		Rule rule = pick(WAVE_RULES);
 		GeoLocation location = pick(LOCATIONS);
-		int site = random.nextInt(CONFIG_IDS.length);
+		Site site = pick(SITES);
 
 		// The whole wave must end before now, so it starts at least WAVE_DURATION before the end
 		Instant waveStart = randomTimeBetween(start, end.minus(WAVE_DURATION));
@@ -164,19 +166,18 @@ public class EventGenerator {
 	// Random everything; a pool of 200 IPs, so some background IPs repeat naturally
 	private Event backgroundEvent() {
 		String ip = "203.0.113." + randomBetween(1, 200);
-		int site = random.nextInt(CONFIG_IDS.length);
-		return event(randomTimeBetween(start, end), site, ip, pick(PATHS), pick(RULES), pick(LOCATIONS));
+		return event(randomTimeBetween(start, end), pick(SITES), ip, pick(PATHS), pick(RULES), pick(LOCATIONS));
 	}
 
-	private Event event(Instant time, int site, String ip, String path, Rule rule, GeoLocation location) {
+	private Event event(Instant time, Site site, String ip, String path, Rule rule, GeoLocation location) {
 		String action = randomAction();
 		return new Event(
 				String.format("evt-%06d", nextEventNumber++),
 				time,
-				CONFIG_IDS[site],
-				POLICY_IDS[site],
+				site.configId(),
+				site.policyId(),
 				ip,
-				HOSTNAMES[site],
+				site.hostname(),
 				path,
 				path.contains("login") ? "POST" : "GET",
 				action.equals("DENY") ? 403 : 200,
@@ -221,17 +222,21 @@ public class EventGenerator {
 		return json.append("]\n").toString();
 	}
 
+	record Site(long configId, String policyId, String hostname) {
+	}
+
 	record Rule(String id, String name, String message, String severity, String category) {
 	}
 
 	record GeoLocation(String country, String city) {
 	}
 
+	// Same fields, same order and same nesting as the JSON the ingest API expects
 	record Event(String eventId, Instant timestamp, long configId, String policyId, String clientIp,
 			String hostname, String path, String method, int statusCode, String userAgent,
 			Rule rule, String action, GeoLocation geoLocation, int requestSize, int responseSize) {
 
-		// One event as one line of JSON, in the shape the ingest API expects
+		// One event as one line of JSON
 		String toJson() {
 			return "{"
 					+ "\"eventId\":\"" + eventId + "\","
