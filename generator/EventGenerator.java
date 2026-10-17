@@ -41,6 +41,7 @@ public class EventGenerator {
 	private static final double WAVE_SHARE = 0.3;
 	private static final int MIN_WAVE_SIZE = 20;
 	private static final int MAX_WAVE_SIZE = 80;
+	private static final int MAX_SECONDS_BETWEEN_WAVE_EVENTS = 5;
 
 	private static final long[] CONFIG_IDS = { 14227, 14228, 31001 };
 	private static final String[] POLICY_IDS = { "pol_web1", "pol_api1", "pol_shop1" };
@@ -59,9 +60,11 @@ public class EventGenerator {
 			"sqlmap/1.7",
 			"Go-http-client/1.1" };
 
-	private static final String[][] LOCATIONS = {
-			{ "CN", "Beijing" }, { "RU", "Moscow" }, { "US", "New York" }, { "BR", "Sao Paulo" },
-			{ "DE", "Berlin" }, { "IN", "Mumbai" }, { "NL", "Amsterdam" } };
+	private static final GeoLocation[] LOCATIONS = {
+			new GeoLocation("CN", "Beijing"), new GeoLocation("RU", "Moscow"),
+			new GeoLocation("US", "New York"), new GeoLocation("BR", "Sao Paulo"),
+			new GeoLocation("DE", "Berlin"), new GeoLocation("IN", "Mumbai"),
+			new GeoLocation("NL", "Amsterdam") };
 
 	// One rule per category: id, name, message, two typical severities
 	private static final Rule[] RULES = {
@@ -143,13 +146,16 @@ public class EventGenerator {
 		String ip = "198.51.100." + randomBetween(1, 254);
 		String path = pick(WAVE_PATHS);
 		Rule rule = pick(WAVE_RULES);
-		String[] location = pick(LOCATIONS);
+		GeoLocation location = pick(LOCATIONS);
 		int site = random.nextInt(CONFIG_IDS.length);
-		Instant time = randomTime();
+
+		// Start early enough that even the longest wave ends before now
+		Instant latestStart = end.minusSeconds((long) MAX_WAVE_SIZE * MAX_SECONDS_BETWEEN_WAVE_EVENTS);
+		Instant time = randomTimeBetween(start, latestStart);
 
 		List<Event> events = new ArrayList<>();
 		for (int i = 0; i < size; i++) {
-			time = time.plusSeconds(randomBetween(1, 5));
+			time = time.plusSeconds(randomBetween(1, MAX_SECONDS_BETWEEN_WAVE_EVENTS));
 			events.add(event(time, site, ip, path, rule, location, true));
 		}
 		return events;
@@ -158,10 +164,10 @@ public class EventGenerator {
 	private Event backgroundEvent() {
 		// A pool of 200 IPs, so some background IPs repeat naturally
 		String ip = "203.0.113." + randomBetween(1, 200);
-		return event(randomTime(), random.nextInt(CONFIG_IDS.length), ip, pick(PATHS), pick(RULES), pick(LOCATIONS), false);
+		return event(randomTimeBetween(start, end), random.nextInt(CONFIG_IDS.length), ip, pick(PATHS), pick(RULES), pick(LOCATIONS), false);
 	}
 
-	private Event event(Instant time, int site, String ip, String path, Rule rule, String[] location, boolean inWave) {
+	private Event event(Instant time, int site, String ip, String path, Rule rule, GeoLocation location, boolean inWave) {
 		String action = randomAction();
 		return new Event(
 				String.format("evt-%06d", nextEventNumber++),
@@ -177,8 +183,7 @@ public class EventGenerator {
 				rule,
 				random.nextBoolean() ? rule.severity1() : rule.severity2(),
 				action,
-				location[0],
-				location[1],
+				location,
 				randomBetween(200, 5000),
 				action.equals("DENY") ? 0 : randomBetween(500, 20000),
 				inWave);
@@ -196,8 +201,8 @@ public class EventGenerator {
 		return "MONITOR";
 	}
 
-	private Instant randomTime() {
-		return start.plusSeconds(random.nextLong(TIME_SPAN.toSeconds()));
+	private Instant randomTimeBetween(Instant from, Instant to) {
+		return from.plusSeconds(random.nextLong(Duration.between(from, to).toSeconds()));
 	}
 
 	private int randomBetween(int min, int max) {
@@ -224,9 +229,12 @@ public class EventGenerator {
 	record Rule(String id, String name, String message, String category, String severity1, String severity2) {
 	}
 
+	record GeoLocation(String country, String city) {
+	}
+
 	record Event(String eventId, Instant timestamp, long configId, String policyId, String clientIp,
 			String hostname, String path, String method, int statusCode, String userAgent,
-			Rule rule, String severity, String action, String country, String city,
+			Rule rule, String severity, String action, GeoLocation geoLocation,
 			int requestSize, int responseSize, boolean inWave) {
 
 		// One event as one line of JSON, in the shape the ingest API expects
@@ -249,7 +257,9 @@ public class EventGenerator {
 					+ "\"severity\":\"" + severity + "\","
 					+ "\"category\":\"" + rule.category() + "\"},"
 					+ "\"action\":\"" + action + "\","
-					+ "\"geoLocation\":{\"country\":\"" + country + "\",\"city\":\"" + city + "\"},"
+					+ "\"geoLocation\":{"
+					+ "\"country\":\"" + geoLocation.country() + "\","
+					+ "\"city\":\"" + geoLocation.city() + "\"},"
 					+ "\"requestSize\":" + requestSize + ","
 					+ "\"responseSize\":" + responseSize
 					+ "}";
