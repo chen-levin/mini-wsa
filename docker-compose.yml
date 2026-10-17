@@ -9,5 +9,23 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # The app waits until Postgres accepts connections
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U miniwsa -d miniwsa"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Inside Docker, Postgres is reached by its service name, not localhost
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/miniwsa
+    ports:
+      - "8080:8080"
+
 volumes:
   pgdata:
