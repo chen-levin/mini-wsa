@@ -17,8 +17,9 @@ import java.util.Random;
  * Generates random security events (DLRs) for the Mini WSA ingest API.
  *
  * Mix of:
- *  - background events: random IPs, paths and rules, spread over the last few hours
- *  - attack waves: one IP hitting one path many times within a few minutes
+ *  - attack waves: one IP hitting one path 50 times, 5 seconds apart
+ *  - background events: random IPs, paths and rules
+ * All events fall within the last 6 hours.
  *
  * Run (no build needed, Java 21):
  *   java generator/EventGenerator.java [count] [outputFile]        write to a file
@@ -34,14 +35,14 @@ public class EventGenerator {
 	private static final String DEFAULT_BASE_URL = "http://localhost:8080";
 	private static final int BATCH_SIZE = 500;
 
-	// How the events are spread in time: over the last 6 hours, ending now
+	// All events fall within the last 6 hours
 	private static final Duration TIME_SPAN = Duration.ofHours(6);
 
-	// Roughly this share of events belongs to attack waves
-	private static final double WAVE_SHARE = 0.3;
-	private static final int MIN_WAVE_SIZE = 20;
-	private static final int MAX_WAVE_SIZE = 80;
-	private static final int MAX_SECONDS_BETWEEN_WAVE_EVENTS = 5;
+	// 30% of events belong to attack waves; every wave is 50 events, 5 seconds apart
+	private static final int WAVE_PERCENT = 30;
+	private static final int WAVE_SIZE = 50;
+	private static final int SECONDS_BETWEEN_WAVE_EVENTS = 5;
+	private static final Duration WAVE_DURATION = Duration.ofSeconds((long) WAVE_SIZE * SECONDS_BETWEEN_WAVE_EVENTS);
 
 	private static final long[] CONFIG_IDS = { 14227, 14228, 31001 };
 	private static final String[] POLICY_IDS = { "pol_web1", "pol_api1", "pol_shop1" };
@@ -66,15 +67,15 @@ public class EventGenerator {
 			new GeoLocation("DE", "Berlin"), new GeoLocation("IN", "Mumbai"),
 			new GeoLocation("NL", "Amsterdam") };
 
-	// One rule per category: id, name, message, two typical severities
+	// One rule per category
 	private static final Rule[] RULES = {
-			new Rule("950001", "SQL_INJECTION", "SQL Injection Attack Detected", "INJECTION", "CRITICAL", "HIGH"),
-			new Rule("941100", "XSS_ATTACK", "Cross-site Scripting Attack Detected", "XSS", "HIGH", "MEDIUM"),
-			new Rule("920100", "INVALID_HTTP_REQUEST", "Malformed HTTP Request", "PROTOCOL_VIOLATION", "MEDIUM", "LOW"),
-			new Rule("950100", "SENSITIVE_DATA_EXPOSURE", "Sensitive Data in Response", "DATA_LEAKAGE", "CRITICAL", "HIGH"),
-			new Rule("999001", "BAD_BOT", "Known Malicious Bot", "BOT", "LOW", "MEDIUM"),
-			new Rule("999100", "SLOW_POST_DOS", "Slow POST Denial of Service", "DOS", "HIGH", "CRITICAL"),
-			new Rule("999200", "RATE_LIMIT_EXCEEDED", "Rate Limit Exceeded", "RATE_LIMIT", "LOW", "MEDIUM") };
+			new Rule("950001", "SQL_INJECTION", "SQL Injection Attack Detected", "CRITICAL", "INJECTION"),
+			new Rule("941100", "XSS_ATTACK", "Cross-site Scripting Attack Detected", "HIGH", "XSS"),
+			new Rule("920100", "INVALID_HTTP_REQUEST", "Malformed HTTP Request", "MEDIUM", "PROTOCOL_VIOLATION"),
+			new Rule("950100", "SENSITIVE_DATA_EXPOSURE", "Sensitive Data in Response", "CRITICAL", "DATA_LEAKAGE"),
+			new Rule("999001", "BAD_BOT", "Known Malicious Bot", "LOW", "BOT"),
+			new Rule("999100", "SLOW_POST_DOS", "Slow POST Denial of Service", "HIGH", "DOS"),
+			new Rule("999200", "RATE_LIMIT_EXCEEDED", "Rate Limit Exceeded", "LOW", "RATE_LIMIT") };
 
 	// Waves use the categories that come in bursts: injection probes, bots, DoS, rate limiting
 	private static final Rule[] WAVE_RULES = { RULES[0], RULES[4], RULES[5], RULES[6] };
@@ -87,12 +88,14 @@ public class EventGenerator {
 	public static void main(String[] args) throws IOException, InterruptedException {
 		int count = args.length > 0 ? Integer.parseInt(args[0]) : DEFAULT_COUNT;
 
-		EventGenerator generator = new EventGenerator();
-		List<Event> events = generator.generate(count);
+		// e.g. 10000 events: 30% = 3000 wave events = 60 waves of 50, plus 7000 background events
+		int waveCount = count * WAVE_PERCENT / 100 / WAVE_SIZE;
+		int backgroundCount = count - waveCount * WAVE_SIZE;
 
-		long waveEvents = events.stream().filter(Event::inWave).count();
-		System.out.printf("Generated %d events (%d background, %d in attack waves)%n",
-				events.size(), events.size() - waveEvents, waveEvents);
+		EventGenerator generator = new EventGenerator();
+		List<Event> events = generator.generate(waveCount, backgroundCount);
+		System.out.printf("Generated %d events: %d waves of %d events + %d background events%n",
+				events.size(), waveCount, WAVE_SIZE, backgroundCount);
 
 		if (args.length > 1 && args[1].equals("--send")) {
 			String baseUrl = args.length > 2 ? args[2] : DEFAULT_BASE_URL;
@@ -126,48 +129,46 @@ public class EventGenerator {
 		System.out.println("Done: all events ingested at " + ingestUri);
 	}
 
-	List<Event> generate(int count) {
+	List<Event> generate(int waveCount, int backgroundCount) {
 		List<Event> events = new ArrayList<>();
-		while (events.size() < count) {
-			if (random.nextDouble() < WAVE_SHARE / averageWaveSize()) {
-				int size = Math.min(randomBetween(MIN_WAVE_SIZE, MAX_WAVE_SIZE), count - events.size());
-				events.addAll(wave(size));
-			} else {
-				events.add(backgroundEvent());
-			}
+		for (int i = 0; i < waveCount; i++) {
+			events.addAll(wave());
+		}
+		for (int i = 0; i < backgroundCount; i++) {
+			events.add(backgroundEvent());
 		}
 		// Oldest first, like a real stream of events
 		events.sort(Comparator.comparing(Event::timestamp));
 		return events;
 	}
 
-	// One attacker IP, one path, one rule, events a few seconds apart
-	private List<Event> wave(int size) {
+	// One attacker: same IP, path, rule, location and site for all 50 events, 5 seconds apart
+	private List<Event> wave() {
 		String ip = "198.51.100." + randomBetween(1, 254);
 		String path = pick(WAVE_PATHS);
 		Rule rule = pick(WAVE_RULES);
 		GeoLocation location = pick(LOCATIONS);
 		int site = random.nextInt(CONFIG_IDS.length);
 
-		// Start early enough that even the longest wave ends before now
-		Instant latestStart = end.minusSeconds((long) MAX_WAVE_SIZE * MAX_SECONDS_BETWEEN_WAVE_EVENTS);
-		Instant time = randomTimeBetween(start, latestStart);
+		// The whole wave must end before now, so it starts at least WAVE_DURATION before the end
+		Instant waveStart = randomTimeBetween(start, end.minus(WAVE_DURATION));
 
 		List<Event> events = new ArrayList<>();
-		for (int i = 0; i < size; i++) {
-			time = time.plusSeconds(randomBetween(1, MAX_SECONDS_BETWEEN_WAVE_EVENTS));
-			events.add(event(time, site, ip, path, rule, location, true));
+		for (int i = 0; i < WAVE_SIZE; i++) {
+			Instant time = waveStart.plusSeconds((long) i * SECONDS_BETWEEN_WAVE_EVENTS);
+			events.add(event(time, site, ip, path, rule, location));
 		}
 		return events;
 	}
 
+	// Random everything; a pool of 200 IPs, so some background IPs repeat naturally
 	private Event backgroundEvent() {
-		// A pool of 200 IPs, so some background IPs repeat naturally
 		String ip = "203.0.113." + randomBetween(1, 200);
-		return event(randomTimeBetween(start, end), random.nextInt(CONFIG_IDS.length), ip, pick(PATHS), pick(RULES), pick(LOCATIONS), false);
+		int site = random.nextInt(CONFIG_IDS.length);
+		return event(randomTimeBetween(start, end), site, ip, pick(PATHS), pick(RULES), pick(LOCATIONS));
 	}
 
-	private Event event(Instant time, int site, String ip, String path, Rule rule, GeoLocation location, boolean inWave) {
+	private Event event(Instant time, int site, String ip, String path, Rule rule, GeoLocation location) {
 		String action = randomAction();
 		return new Event(
 				String.format("evt-%06d", nextEventNumber++),
@@ -181,12 +182,10 @@ public class EventGenerator {
 				action.equals("DENY") ? 403 : 200,
 				pick(USER_AGENTS),
 				rule,
-				random.nextBoolean() ? rule.severity1() : rule.severity2(),
 				action,
 				location,
 				randomBetween(200, 5000),
-				action.equals("DENY") ? 0 : randomBetween(500, 20000),
-				inWave);
+				action.equals("DENY") ? 0 : randomBetween(500, 20000));
 	}
 
 	// DENY 50%, ALERT 30%, MONITOR 20%
@@ -213,10 +212,6 @@ public class EventGenerator {
 		return values[random.nextInt(values.length)];
 	}
 
-	private static double averageWaveSize() {
-		return (MIN_WAVE_SIZE + MAX_WAVE_SIZE) / 2.0;
-	}
-
 	private static String toJsonArray(List<Event> events) {
 		StringBuilder json = new StringBuilder("[\n");
 		for (int i = 0; i < events.size(); i++) {
@@ -226,7 +221,7 @@ public class EventGenerator {
 		return json.append("]\n").toString();
 	}
 
-	record Rule(String id, String name, String message, String category, String severity1, String severity2) {
+	record Rule(String id, String name, String message, String severity, String category) {
 	}
 
 	record GeoLocation(String country, String city) {
@@ -234,8 +229,7 @@ public class EventGenerator {
 
 	record Event(String eventId, Instant timestamp, long configId, String policyId, String clientIp,
 			String hostname, String path, String method, int statusCode, String userAgent,
-			Rule rule, String severity, String action, GeoLocation geoLocation,
-			int requestSize, int responseSize, boolean inWave) {
+			Rule rule, String action, GeoLocation geoLocation, int requestSize, int responseSize) {
 
 		// One event as one line of JSON, in the shape the ingest API expects
 		String toJson() {
@@ -254,7 +248,7 @@ public class EventGenerator {
 					+ "\"id\":\"" + rule.id() + "\","
 					+ "\"name\":\"" + rule.name() + "\","
 					+ "\"message\":\"" + rule.message() + "\","
-					+ "\"severity\":\"" + severity + "\","
+					+ "\"severity\":\"" + rule.severity() + "\","
 					+ "\"category\":\"" + rule.category() + "\"},"
 					+ "\"action\":\"" + action + "\","
 					+ "\"geoLocation\":{"
