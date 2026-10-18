@@ -1,6 +1,6 @@
 # Mini WSA – Mini Security Analytics Pipeline
 
-A small Web Security Analytics service, that ingests security events (DLRs),
+A small Web Security Analytics service that ingests security events (DLRs),
 classifies and scores them, stores them in PostgreSQL, and exposes analytics through a REST API.
 
 **Stack:** Java 21, Spring Boot 4, Spring Data JPA (Hibernate), Flyway, PostgreSQL 16, Bean Validation,
@@ -360,7 +360,7 @@ Writing and reading are separate, so each part can be understood, tested and cha
   back and nothing is stored. The client can then safely retry the batch. Inside the transaction, the
   repeat-offender count sees the events saved earlier in the same request.
 - **Stats and samples: `@Transactional(readOnly = true)`.** All queries of a request share one connection;
-  Hibernate skips dirty checking for the loaded entities, and PostgreSQL rejects any accidental write.
+  Hibernate skips dirty checking for any entities it loads, and PostgreSQL rejects any accidental write.
 
 ### Other decisions
 
@@ -406,7 +406,7 @@ Integration tests run the real flow: HTTP (MockMvc) → validation → services 
   the service could score all events first and insert them in one batch.
 - **Faster large requests.** One request is one transaction, and before each count query Hibernate re-checks
   every event already saved in that request, so the work grows with the square of the request size: 10,000 events
-  in one request take about 4–7 times longer than the same events in 20 requests of 500 (see the next section).
+  in one request take about 4–7 times longer than the same events in 20 requests of 500.
   - **Limit the events per request** (for example 1,000, otherwise 400). Clients send batches, as the generator
     does, and Hibernate's automatic cleanup at the end of each request keeps it fast. This alone is enough.
   - **Only if large requests must be supported:** every 500 events, call `flush()` (write the saved events to the
