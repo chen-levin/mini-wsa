@@ -241,8 +241,29 @@ java generator/EventGenerator.java 10000 --send           # POST to http://local
 java generator/EventGenerator.java 10000 --send http://other-host:8080
 ```
 
-10,000 events = 60 waves of 50 + 7,000 background events. Sending takes a few seconds.
 All IPs are from ranges reserved for documentation.
+
+**Number of events:** the first argument (default 10,000). The split into waves and background is computed from it,
+and the total is always exactly the number asked for:
+
+| Events | Attack waves (50 events each) | Background events |
+|---|---|---|
+| 1,000 | 6 waves (300 events) | 700 |
+| 10,000 | 60 waves (3,000 events) | 7,000 |
+| 50,000 | 300 waves (15,000 events) | 35,000 |
+
+Below about 167 events there are no waves (30% of the count is less than one wave). Sending 10,000 events in
+batches takes a few seconds.
+
+**Shape of the data:** constants at the top of `EventGenerator.java`, each a one-line change:
+
+| Constant | Default | Controls |
+|---|---|---|
+| `WAVE_PERCENT` | 30 | Share of events in attack waves |
+| `WAVE_SIZE` | 50 | Events per wave |
+| `SECONDS_BETWEEN_WAVE_EVENTS` | 5 | Speed of each attack |
+| `TIME_SPAN` | 6 hours | How far back the events go |
+| `BATCH_SIZE` | 500 | Events per request with `--send` |
 
 ---
 
