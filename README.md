@@ -21,7 +21,6 @@ JUnit 5, Mockito, Testcontainers, Docker Compose.
 - [Testing](#testing)
 - [What I would improve with more time](#what-i-would-improve-with-more-time)
 - [Challenges and how I solved them](#challenges-and-how-i-solved-them)
-- [One thing I learned](#one-thing-i-learned)
 
 ---
 
@@ -437,5 +436,3 @@ Integration tests run the real flow: HTTP (MockMvc) → validation → services 
     busiest normal IPs had more events than a 50-event attack wave and appeared in `topAttackers`. Fix: about 500
     background IPs (two documentation ranges), about 14 events each, so the busiest stays far below 50 and the top
     attackers are always the attack waves.
-
----
