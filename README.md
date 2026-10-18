@@ -363,9 +363,10 @@ Integration tests run the real flow: HTTP (MockMvc) → validation → services 
   enrich and store in micro-batches. Ingestion stays fast during attack floods and survives database outages.
   This needs idempotent writes, since delivery is at-least-once.
 - **Idempotency / deduplication** with a unique `eventId`, so retries don't store events twice.
-- **A faster repeat-offender counter.** Today it is one count query per event. Partitioning the stream by
-  `clientIp` lets each worker keep a 10-minute window in memory (or in a Kafka Streams state store);
-  Redis is the option when several services need the counts.
+- **Batch inserts with an in-memory counter.** Inserting events in one batch would be faster than one INSERT per
+  event. In our code it isn't possible: the repeat-offender count is read from the database, so each event must be
+  saved before the next one is scored. With the count kept in memory (or in Redis, if several instances share it),
+  the service could score all events first and insert them in one batch.
 - **Faster large requests.** One request is one transaction, and before each count query Hibernate re-checks
   every event already saved in that request, so the work grows with the square of the request size: 10,000 events
   in one request take about 4–7 times longer than the same events in 20 requests of 500 (see the next section).
@@ -374,10 +375,6 @@ Integration tests run the real flow: HTTP (MockMvc) → validation → services 
   - **Only if large requests must be supported:** every 500 events, call `flush()` (write the saved events to the
     database, inside the same transaction, not a commit) and `clear()` (make Hibernate forget them), so it never
     has more than 500 events to re-check.
-- **Batch inserts.**  each event is inserted on its own, because the repeat-offender count reads earlier
-  events from the database, so they must be saved before the next one is scored. With the counter in memory
-  (previous point), the service could score all events of a request first and then insert them in one batch.
-  This also needs sequence-generated ids, since Hibernate cannot batch inserts with `IDENTITY` ids.
 - **Keyset (cursor) pagination for deep pages.** With `OFFSET`, the database reads and throws away every skipped
   event: page 50,000 of 20 reads about a million rows to return 20. With keyset pagination, each response includes a
   bookmark, the time and id of its last event (`"nextCursor": "11:40_5"`), and the client sends it back for the next
@@ -387,17 +384,15 @@ Integration tests run the real flow: HTTP (MockMvc) → validation → services 
   next page. The spec asks for `limit`/`offset`, which is fast enough at this data size.
 - **A columnar store** (ClickHouse) and pre-aggregated stats for real scale.
 - **Hide internal details** from parse error messages (Java class names), and a case-insensitive path check
-  (today `/Admin` and `/wp-admin` don't get the `/admin` bonus).
+  (in our code `/Admin` and `/wp-admin` don't get the `/admin` bonus).
 
 
 ---
 
 ## Challenges and how I solved them
 
-- **Repeat offenders inside one batch.** Saving the whole batch with `saveAll` at the end meant events in the same
-  request couldn't see each other, so an attack wave sent as one request never got the bonus. I save each event
-  before scoring the next, inside one transaction, and added tests for a 7-event wave and for mixed IPs.
-- **Keeping a batch all-or-nothing.** Saving events one by one raised a question: what if event 300 of 500 fails?
+- **Keeping a batch all-or-nothing.** Events are saved one by one, because each score needs the earlier events of
+  the same IP to be in the database. That raised a question: what if event 300 of 500 fails?
   Each repository `save()` runs in its own transaction by default, so events 1–299 would already be committed, and
   the client's retry would store them twice (there is no deduplication yet). I put `@Transactional` on
   `IngestService.ingest()`, so every `save()` joins one transaction: 500 INSERTs, one COMMIT, and a failure rolls
